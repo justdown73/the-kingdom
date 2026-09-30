@@ -39,16 +39,14 @@ def api_get(path, params=None):
                 )
 
                 print(
-                    f"Rate limited. "
-                    f"Waiting {wait}s..."
+                    f"Rate limited. Waiting {wait}s..."
                 )
 
                 time.sleep(wait)
                 continue
 
             print(
-                f"API error {r.status_code}: "
-                f"{url}"
+                f"API error {r.status_code}: {url}"
             )
 
             return None
@@ -100,7 +98,6 @@ def load_state():
         return set()
 
     try:
-
         with open(STATE_FILE, "r") as f:
             data = json.load(f)
 
@@ -109,7 +106,6 @@ def load_state():
         )
 
     except Exception:
-
         return set()
 
 
@@ -133,7 +129,6 @@ def get_symbols():
     )
 
     if not data:
-
         raise Exception(
             "Could not get Binance exchange information."
         )
@@ -185,10 +180,13 @@ def check_coin(symbol):
         for candle in candles
     )
 
+    # Current/latest candle close
     current_price = float(
         candles[-1][4]
     )
 
+    # Highest price movement from
+    # the beginning of the 2-hour window
     change = (
         (highest_price - start_price)
         / start_price
@@ -204,47 +202,10 @@ def check_coin(symbol):
 
 def main():
 
-    # --------------------------------
-    # TELEGRAM CONNECTION TEST
-    # --------------------------------
-
-    print(
-        "Sending Telegram test message..."
-    )
-
-    try:
-
-        send_telegram(
-            "✅ The Kingdom Telegram test is working!"
-        )
-
-        print(
-            "Telegram test sent successfully."
-        )
-
-    except Exception as e:
-
-        print(
-            f"Telegram test failed: {e}"
-        )
-
-    # --------------------------------
-    # SCANNER START
-    # --------------------------------
-
     print("================================")
-    print(
-        "The Kingdom scanner started"
-    )
-
-    print(
-        "Threshold: +30%"
-    )
-
-    print(
-        "Window: 2 hours"
-    )
-
+    print("The Kingdom scanner started")
+    print("Threshold: +30%")
+    print("Window: 2 hours")
     print("================================")
 
     symbols = get_symbols()
@@ -279,6 +240,10 @@ def main():
                 start_price
             ) = result
 
+            # --------------------------------
+            # NEW +30% ALERT
+            # --------------------------------
+
             if change >= THRESHOLD:
 
                 if symbol not in alerted:
@@ -303,11 +268,11 @@ def main():
                         f"+{change:.2f}%"
                     )
 
-            else:
+            # --------------------------------
+            # RESET AFTER DROPPING BELOW 30%
+            # --------------------------------
 
-                # Remove the coin from the
-                # alert list once the rolling
-                # 2-hour movement is below 30%.
+            else:
 
                 if symbol in alerted:
 
@@ -335,9 +300,8 @@ def main():
                 f"{number}/{len(symbols)}"
             )
 
-    save_state(
-        alerted
-    )
+    # Save alert state
+    save_state(alerted)
 
     print("================================")
 
@@ -353,7 +317,7 @@ def main():
     print("================================")
 
     # --------------------------------
-    # SEND REAL MARKET ALERTS
+    # SEND TELEGRAM ALERTS
     # --------------------------------
 
     for (
