@@ -11,7 +11,7 @@ CHAT_ID = os.environ["CHAT_ID"]
 
 BINANCE_URL = "https://data-api.binance.vision"
 
-THRESHOLD = 30.0
+THRESHOLD = 23.0
 WINDOW_CANDLES = 25
 STATE_FILE = "alerts.json"
 
@@ -235,7 +235,7 @@ def main():
 
     print("================================")
     print("The Kingdom scanner started")
-    print("Threshold: +30%")
+    print("Threshold: +23%")
     print("Window: 2 hours")
     print(
         f"Parallel workers: {MAX_WORKERS}"
@@ -303,7 +303,7 @@ def main():
                 ) = result
 
                 # --------------------------------
-                # NEW +30% ALERT
+                # NEW +23% ALERT
                 # --------------------------------
 
                 if change >= THRESHOLD:
