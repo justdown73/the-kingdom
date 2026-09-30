@@ -3,6 +3,8 @@ import time
 import json
 import requests
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
@@ -13,6 +15,9 @@ THRESHOLD = 30.0
 WINDOW_CANDLES = 25
 STATE_FILE = "alerts.json"
 
+# Safe parallel workers
+MAX_WORKERS = 20
+
 HEADERS = {
     "User-Agent": "TheKingdom/1.0"
 }
@@ -22,7 +27,9 @@ def api_get(path, params=None):
     url = BINANCE_URL + path
 
     for attempt in range(3):
+
         try:
+
             r = requests.get(
                 url,
                 params=params,
@@ -34,24 +41,31 @@ def api_get(path, params=None):
                 return r.json()
 
             if r.status_code in (429, 418):
+
                 wait = int(
-                    r.headers.get("Retry-After", "10")
+                    r.headers.get(
+                        "Retry-After",
+                        "10"
+                    )
                 )
 
                 print(
-                    f"Rate limited. Waiting {wait}s..."
+                    f"Rate limited. "
+                    f"Waiting {wait}s..."
                 )
 
                 time.sleep(wait)
                 continue
 
             print(
-                f"API error {r.status_code}: {url}"
+                f"API error {r.status_code}: "
+                f"{url}"
             )
 
             return None
 
         except Exception as e:
+
             print(
                 f"Request error: {e}"
             )
@@ -82,6 +96,7 @@ def send_telegram(message):
     result = r.json()
 
     if not result.get("ok"):
+
         raise Exception(
             result.get(
                 "description",
@@ -98,24 +113,38 @@ def load_state():
         return set()
 
     try:
-        with open(STATE_FILE, "r") as f:
+
+        with open(
+            STATE_FILE,
+            "r"
+        ) as f:
+
             data = json.load(f)
 
         return set(
-            data.get("alerted", [])
+            data.get(
+                "alerted",
+                []
+            )
         )
 
     except Exception:
+
         return set()
 
 
 def save_state(alerted):
 
-    with open(STATE_FILE, "w") as f:
+    with open(
+        STATE_FILE,
+        "w"
+    ) as f:
 
         json.dump(
             {
-                "alerted": sorted(alerted)
+                "alerted": sorted(
+                    alerted
+                )
             },
             f,
             indent=2
@@ -129,6 +158,7 @@ def get_symbols():
     )
 
     if not data:
+
         raise Exception(
             "Could not get Binance exchange information."
         )
@@ -180,19 +210,20 @@ def check_coin(symbol):
         for candle in candles
     )
 
-    # Current/latest candle close
+    # Latest candle close
     current_price = float(
         candles[-1][4]
     )
 
-    # Highest price movement from
-    # the beginning of the 2-hour window
+    # Maximum movement from
+    # the beginning of the window
     change = (
         (highest_price - start_price)
         / start_price
     ) * 100
 
     return (
+        symbol,
         change,
         current_price,
         highest_price,
@@ -206,7 +237,12 @@ def main():
     print("The Kingdom scanner started")
     print("Threshold: +30%")
     print("Window: 2 hours")
+    print(
+        f"Parallel workers: {MAX_WORKERS}"
+    )
     print("================================")
+
+    start_time = time.time()
 
     symbols = get_symbols()
 
@@ -219,95 +255,135 @@ def main():
 
     new_alerts = []
 
-    for number, symbol in enumerate(
-        symbols,
-        start=1
-    ):
+    completed = 0
 
-        try:
+    # --------------------------------
+    # PARALLEL SCANNING
+    # --------------------------------
 
-            result = check_coin(
+    print(
+        "Starting parallel scan..."
+    )
+
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+        futures = {
+            executor.submit(
+                check_coin,
                 symbol
-            )
+            ): symbol
+            for symbol in symbols
+        }
 
-            if result is None:
-                continue
+        for future in as_completed(
+            futures
+        ):
 
-            (
-                change,
-                current_price,
-                highest_price,
-                start_price
-            ) = result
+            symbol = futures[
+                future
+            ]
 
-            # --------------------------------
-            # NEW +30% ALERT
-            # --------------------------------
+            completed += 1
 
-            if change >= THRESHOLD:
+            try:
 
-                if symbol not in alerted:
+                result = future.result()
 
-                    new_alerts.append(
-                        (
-                            symbol,
-                            change,
-                            current_price,
-                            highest_price,
-                            start_price
+                if result is None:
+                    continue
+
+                (
+                    symbol,
+                    change,
+                    current_price,
+                    highest_price,
+                    start_price
+                ) = result
+
+                # --------------------------------
+                # NEW +30% ALERT
+                # --------------------------------
+
+                if change >= THRESHOLD:
+
+                    if symbol not in alerted:
+
+                        new_alerts.append(
+                            (
+                                symbol,
+                                change,
+                                current_price,
+                                highest_price,
+                                start_price
+                            )
                         )
-                    )
 
-                    alerted.add(
-                        symbol
-                    )
+                        alerted.add(
+                            symbol
+                        )
 
-                    print(
-                        f"NEW ALERT: "
-                        f"{symbol} "
-                        f"+{change:.2f}%"
-                    )
+                        print(
+                            f"NEW ALERT: "
+                            f"{symbol} "
+                            f"+{change:.2f}%"
+                        )
 
-            # --------------------------------
-            # RESET AFTER DROPPING BELOW 30%
-            # --------------------------------
+                # --------------------------------
+                # RESET
+                # --------------------------------
 
-            else:
+                else:
 
-                if symbol in alerted:
+                    if symbol in alerted:
 
-                    alerted.remove(
-                        symbol
-                    )
+                        alerted.remove(
+                            symbol
+                        )
 
-                    print(
-                        f"RESET: {symbol}"
-                    )
+                        print(
+                            f"RESET: {symbol}"
+                        )
 
-        except Exception as e:
+            except Exception as e:
 
-            print(
-                f"{symbol}: {e}"
-            )
+                print(
+                    f"{symbol}: {e}"
+                )
 
-        # Small pause between requests
-        time.sleep(0.03)
+            # Progress
+            if (
+                completed % 100 == 0
+                or completed == len(symbols)
+            ):
 
-        if number % 100 == 0:
+                print(
+                    f"Checked "
+                    f"{completed}/"
+                    f"{len(symbols)}"
+                )
 
-            print(
-                f"Checked "
-                f"{number}/{len(symbols)}"
-            )
+    # --------------------------------
+    # SAVE STATE
+    # --------------------------------
 
-    # Save alert state
-    save_state(alerted)
+    save_state(
+        alerted
+    )
+
+    elapsed = time.time() - start_time
 
     print("================================")
 
     print(
         f"New alerts: "
         f"{len(new_alerts)}"
+    )
+
+    print(
+        f"Scan time: "
+        f"{elapsed:.1f} seconds"
     )
 
     print(
