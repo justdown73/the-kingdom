@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import requests
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -8,13 +9,13 @@ CHAT_ID = os.environ["CHAT_ID"]
 BASE_URL = "https://api.binance.com"
 
 THRESHOLD = 30.0
-HOURS = 2
+STATE_FILE = "alerts.json"
 
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-    r = requests.post(
+    response = requests.post(
         url,
         data={
             "chat_id": CHAT_ID,
@@ -23,30 +24,58 @@ def send_telegram(message):
         timeout=15
     )
 
-    r.raise_for_status()
+    response.raise_for_status()
+
+
+def load_alerted_coins():
+    if not os.path.exists(STATE_FILE):
+        return set()
+
+    try:
+        with open(STATE_FILE, "r") as f:
+            data = json.load(f)
+
+        return set(data.get("alerted", []))
+
+    except Exception:
+        return set()
+
+
+def save_alerted_coins(coins):
+    with open(STATE_FILE, "w") as f:
+        json.dump(
+            {
+                "alerted": sorted(list(coins))
+            },
+            f,
+            indent=2
+        )
 
 
 def get_symbols():
     url = f"{BASE_URL}/api/v3/exchangeInfo"
 
-    data = requests.get(url, timeout=20).json()
+    response = requests.get(url, timeout=20)
+    response.raise_for_status()
+
+    data = response.json()
 
     symbols = []
 
-    for s in data["symbols"]:
+    for symbol in data["symbols"]:
+
         if (
-            s["status"] == "TRADING"
-            and s["quoteAsset"] == "USDT"
-            and s["isSpotTradingAllowed"]
+            symbol["status"] == "TRADING"
+            and symbol["quoteAsset"] == "USDT"
+            and symbol["isSpotTradingAllowed"]
         ):
-            symbols.append(s["symbol"])
+            symbols.append(symbol["symbol"])
 
     return symbols
 
 
 def check_coin(symbol):
 
-    # Get the last 2 hours using 5-minute candles
     url = f"{BASE_URL}/api/v3/klines"
 
     params = {
@@ -55,12 +84,16 @@ def check_coin(symbol):
         "limit": 25
     }
 
-    r = requests.get(url, params=params, timeout=10)
+    response = requests.get(
+        url,
+        params=params,
+        timeout=10
+    )
 
-    if r.status_code != 200:
+    if response.status_code != 200:
         return None
 
-    candles = r.json()
+    candles = response.json()
 
     if len(candles) < 20:
         return None
@@ -68,13 +101,19 @@ def check_coin(symbol):
     # Price at the beginning of the 2-hour window
     start_price = float(candles[0][1])
 
-    # Highest price reached during the window
-    highest_price = max(float(c[2]) for c in candles)
-
-    change = ((highest_price - start_price) / start_price) * 100
+    # Highest price reached during the last 2 hours
+    highest_price = max(
+        float(candle[2])
+        for candle in candles
+    )
 
     # Current price
     current_price = float(candles[-1][4])
+
+    change = (
+        (highest_price - start_price)
+        / start_price
+    ) * 100
 
     return change, current_price, highest_price
 
@@ -83,13 +122,17 @@ def main():
 
     print("The Kingdom scanner started.")
 
+    alerted_coins = load_alerted_coins()
+
     symbols = get_symbols()
 
-    print(f"Scanning {len(symbols)} Binance USDT pairs...")
+    print(
+        f"Scanning {len(symbols)} USDT pairs..."
+    )
 
-    alerts = []
+    new_alerts = []
 
-    for i, symbol in enumerate(symbols, 1):
+    for index, symbol in enumerate(symbols, 1):
 
         try:
 
@@ -100,52 +143,89 @@ def main():
 
             change, current_price, highest_price = result
 
+            # +30% reached
             if change >= THRESHOLD:
 
-                alerts.append(
-                    (
-                        symbol,
-                        change,
-                        current_price,
-                        highest_price
+                # Only alert if this coin
+                # has NOT already alerted
+                if symbol not in alerted_coins:
+
+                    new_alerts.append(
+                        (
+                            symbol,
+                            change,
+                            current_price,
+                            highest_price
+                        )
                     )
-                )
 
-                print(
-                    f"ALERT: {symbol} +{change:.2f}%"
-                )
+                    alerted_coins.add(symbol)
 
-        except Exception as e:
+                    print(
+                        f"NEW ALERT: "
+                        f"{symbol} +{change:.2f}%"
+                    )
 
-            print(f"{symbol}: {e}")
+            else:
 
-        # Prevent API rate-limit problems
+                # Reset the coin when it falls
+                # below the threshold
+                if symbol in alerted_coins:
+
+                    alerted_coins.remove(symbol)
+
+                    print(
+                        f"RESET: {symbol}"
+                    )
+
+        except Exception as error:
+
+            print(
+                f"{symbol}: {error}"
+            )
+
+        # Small delay to avoid API pressure
         time.sleep(0.08)
 
-        if i % 100 == 0:
-            print(f"Checked {i}/{len(symbols)} coins...")
+        if index % 100 == 0:
+
+            print(
+                f"Checked "
+                f"{index}/{len(symbols)}..."
+            )
+
+    # Save alert state
+    save_alerted_coins(alerted_coins)
 
     print("Scan completed.")
 
-    if not alerts:
-
-        print("No alerts found.")
-
-        return
-
-    for symbol, change, current_price, highest_price in alerts:
+    # Send only NEW alerts
+    for (
+        symbol,
+        change,
+        current_price,
+        highest_price
+    ) in new_alerts:
 
         message = (
             "⚡ Market Alert\n\n"
             f"🪙 {symbol}\n"
-            f"📈 2H High: +{change:.2f}%\n"
+            f"📈 2H Move: +{change:.2f}%\n"
             f"💰 Current: {current_price}\n"
-            f"🔥 High: {highest_price}"
+            f"🔥 2H High: {highest_price}"
         )
 
         send_telegram(message)
 
-        print(f"Telegram alert sent: {symbol}")
+        print(
+            f"Telegram alert sent: {symbol}"
+        )
+
+    if not new_alerts:
+
+        print(
+            "No new alerts."
+        )
 
 
 if __name__ == "__main__":
