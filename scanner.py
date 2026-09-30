@@ -3,6 +3,7 @@ import time
 import json
 import requests
 
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
@@ -33,8 +34,15 @@ def api_get(path, params=None):
                 return r.json()
 
             if r.status_code in (429, 418):
-                wait = int(r.headers.get("Retry-After", "10"))
-                print(f"Rate limited. Waiting {wait}s...")
+                wait = int(
+                    r.headers.get("Retry-After", "10")
+                )
+
+                print(
+                    f"Rate limited. "
+                    f"Waiting {wait}s..."
+                )
+
                 time.sleep(wait)
                 continue
 
@@ -46,13 +54,17 @@ def api_get(path, params=None):
             return None
 
         except Exception as e:
-            print(f"Request error: {e}")
+            print(
+                f"Request error: {e}"
+            )
+
             time.sleep(2)
 
     return None
 
 
 def send_telegram(message):
+
     url = (
         f"https://api.telegram.org/"
         f"bot{TELEGRAM_TOKEN}/sendMessage"
@@ -69,23 +81,42 @@ def send_telegram(message):
 
     r.raise_for_status()
 
+    result = r.json()
+
+    if not result.get("ok"):
+        raise Exception(
+            result.get(
+                "description",
+                "Telegram API error"
+            )
+        )
+
+    return result
+
 
 def load_state():
+
     if not os.path.exists(STATE_FILE):
         return set()
 
     try:
+
         with open(STATE_FILE, "r") as f:
             data = json.load(f)
 
-        return set(data.get("alerted", []))
+        return set(
+            data.get("alerted", [])
+        )
 
     except Exception:
+
         return set()
 
 
 def save_state(alerted):
+
     with open(STATE_FILE, "w") as f:
+
         json.dump(
             {
                 "alerted": sorted(alerted)
@@ -96,11 +127,13 @@ def save_state(alerted):
 
 
 def get_symbols():
+
     data = api_get(
         "/api/v3/exchangeInfo"
     )
 
     if not data:
+
         raise Exception(
             "Could not get Binance exchange information."
         )
@@ -114,7 +147,10 @@ def get_symbols():
             and s["quoteAsset"] == "USDT"
             and s["isSpotTradingAllowed"]
         ):
-            symbols.append(s["symbol"])
+
+            symbols.append(
+                s["symbol"]
+            )
 
     return symbols
 
@@ -138,7 +174,9 @@ def check_coin(symbol):
 
     # Price at the beginning of
     # approximately the last 2 hours
-    start_price = float(candles[0][1])
+    start_price = float(
+        candles[0][1]
+    )
 
     # Highest price touched during
     # the 2-hour window
@@ -166,10 +204,47 @@ def check_coin(symbol):
 
 def main():
 
+    # --------------------------------
+    # TELEGRAM CONNECTION TEST
+    # --------------------------------
+
+    print(
+        "Sending Telegram test message..."
+    )
+
+    try:
+
+        send_telegram(
+            "✅ The Kingdom Telegram test is working!"
+        )
+
+        print(
+            "Telegram test sent successfully."
+        )
+
+    except Exception as e:
+
+        print(
+            f"Telegram test failed: {e}"
+        )
+
+    # --------------------------------
+    # SCANNER START
+    # --------------------------------
+
     print("================================")
-    print("The Kingdom scanner started")
-    print("Threshold: +30%")
-    print("Window: 2 hours")
+    print(
+        "The Kingdom scanner started"
+    )
+
+    print(
+        "Threshold: +30%"
+    )
+
+    print(
+        "Window: 2 hours"
+    )
+
     print("================================")
 
     symbols = get_symbols()
@@ -190,7 +265,9 @@ def main():
 
         try:
 
-            result = check_coin(symbol)
+            result = check_coin(
+                symbol
+            )
 
             if result is None:
                 continue
@@ -216,7 +293,9 @@ def main():
                         )
                     )
 
-                    alerted.add(symbol)
+                    alerted.add(
+                        symbol
+                    )
 
                     print(
                         f"NEW ALERT: "
@@ -229,9 +308,12 @@ def main():
                 # Remove the coin from the
                 # alert list once the rolling
                 # 2-hour movement is below 30%.
+
                 if symbol in alerted:
 
-                    alerted.remove(symbol)
+                    alerted.remove(
+                        symbol
+                    )
 
                     print(
                         f"RESET: {symbol}"
@@ -253,14 +335,26 @@ def main():
                 f"{number}/{len(symbols)}"
             )
 
-    save_state(alerted)
+    save_state(
+        alerted
+    )
 
     print("================================")
+
     print(
-        f"New alerts: {len(new_alerts)}"
+        f"New alerts: "
+        f"{len(new_alerts)}"
     )
-    print("Scan completed.")
+
+    print(
+        "Scan completed."
+    )
+
     print("================================")
+
+    # --------------------------------
+    # SEND REAL MARKET ALERTS
+    # --------------------------------
 
     for (
         symbol,
@@ -281,10 +375,13 @@ def main():
 
         try:
 
-            send_telegram(message)
+            send_telegram(
+                message
+            )
 
             print(
-                f"Telegram sent: {symbol}"
+                f"Telegram sent: "
+                f"{symbol}"
             )
 
         except Exception as e:
