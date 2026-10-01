@@ -9,7 +9,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-BINANCE_URL = "https://data-api.binance.vision"
+# --------------------------------
+# API ENDPOINTS
+# --------------------------------
+
+SPOT_URL = "https://data-api.binance.vision"
+FUTURES_URL = "https://fapi.binance.com"
+
+# --------------------------------
+# SETTINGS
+# --------------------------------
 
 THRESHOLD = 23.0
 WINDOW_CANDLES = 25
@@ -23,8 +32,13 @@ HEADERS = {
 }
 
 
-def api_get(path, params=None):
-    url = BINANCE_URL + path
+# --------------------------------
+# API REQUEST
+# --------------------------------
+
+def api_get(base_url, path, params=None):
+
+    url = base_url + path
 
     for attempt in range(3):
 
@@ -55,6 +69,7 @@ def api_get(path, params=None):
                 )
 
                 time.sleep(wait)
+
                 continue
 
             print(
@@ -74,6 +89,10 @@ def api_get(path, params=None):
 
     return None
 
+
+# --------------------------------
+# TELEGRAM
+# --------------------------------
 
 def send_telegram(message):
 
@@ -107,9 +126,14 @@ def send_telegram(message):
     return result
 
 
+# --------------------------------
+# ALERT STATE
+# --------------------------------
+
 def load_state():
 
     if not os.path.exists(STATE_FILE):
+
         return set()
 
     try:
@@ -121,12 +145,31 @@ def load_state():
 
             data = json.load(f)
 
-        return set(
-            data.get(
-                "alerted",
-                []
-            )
+        old_alerts = data.get(
+            "alerted",
+            []
         )
+
+        alerted = set()
+
+        for item in old_alerts:
+
+            # Old version stored only:
+            # ARKUSDT
+            #
+            # Treat old alerts as Spot alerts.
+
+            if ":" not in item:
+
+                alerted.add(
+                    f"SPOT:{item}"
+                )
+
+            else:
+
+                alerted.add(item)
+
+        return alerted
 
     except Exception:
 
@@ -151,16 +194,21 @@ def save_state(alerted):
         )
 
 
-def get_symbols():
+# --------------------------------
+# GET SPOT SYMBOLS
+# --------------------------------
+
+def get_spot_symbols():
 
     data = api_get(
+        SPOT_URL,
         "/api/v3/exchangeInfo"
     )
 
     if not data:
 
         raise Exception(
-            "Could not get Binance exchange information."
+            "Could not get Spot exchange information."
         )
 
     symbols = []
@@ -180,10 +228,74 @@ def get_symbols():
     return symbols
 
 
-def check_coin(symbol):
+# --------------------------------
+# GET USDT PERPETUAL FUTURES
+# --------------------------------
+
+def get_futures_symbols():
+
+    data = api_get(
+        FUTURES_URL,
+        "/fapi/v1/exchangeInfo"
+    )
+
+    if not data:
+
+        raise Exception(
+            "Could not get Futures exchange information."
+        )
+
+    symbols = []
+
+    for s in data["symbols"]:
+
+        if (
+            s["status"] == "TRADING"
+            and s["contractType"] == "PERPETUAL"
+            and s["quoteAsset"] == "USDT"
+        ):
+
+            symbols.append(
+                s["symbol"]
+            )
+
+    return symbols
+
+
+# --------------------------------
+# CHECK COIN
+# --------------------------------
+
+def check_coin(
+    market,
+    symbol
+):
+
+    if market == "SPOT":
+
+        base_url = SPOT_URL
+
+        display_symbol = symbol
+
+        path = "/api/v3/klines"
+
+    else:
+
+        base_url = FUTURES_URL
+
+        # Binance API uses ARKUSDT
+        # TradingView-style display:
+        # ARKUSDT.P
+
+        display_symbol = (
+            f"{symbol}.P"
+        )
+
+        path = "/fapi/v1/klines"
 
     candles = api_get(
-        "/api/v3/klines",
+        base_url,
+        path,
         {
             "symbol": symbol,
             "interval": "5m",
@@ -192,38 +304,46 @@ def check_coin(symbol):
     )
 
     if not candles:
+
         return None
 
     if len(candles) < 20:
+
         return None
 
     # Price at the beginning of
     # approximately the last 2 hours
+
     start_price = float(
         candles[0][1]
     )
 
     # Highest price touched during
     # the 2-hour window
+
     highest_price = max(
         float(candle[2])
         for candle in candles
     )
 
     # Latest candle close
+
     current_price = float(
         candles[-1][4]
     )
 
     # Maximum movement from
-    # the beginning of the window
+    # beginning of window
+
     change = (
         (highest_price - start_price)
         / start_price
     ) * 100
 
     return (
+        market,
         symbol,
+        display_symbol,
         change,
         current_price,
         highest_price,
@@ -231,25 +351,92 @@ def check_coin(symbol):
     )
 
 
+# --------------------------------
+# MAIN
+# --------------------------------
+
 def main():
 
     print("================================")
-    print("The Kingdom scanner started")
-    print("Threshold: +23%")
-    print("Window: 2 hours")
     print(
-        f"Parallel workers: {MAX_WORKERS}"
+        "The Kingdom scanner started"
     )
+
+    print(
+        "Threshold: +23%"
+    )
+
+    print(
+        "Window: 2 hours"
+    )
+
+    print(
+        f"Parallel workers: "
+        f"{MAX_WORKERS}"
+    )
+
+    print(
+        "Markets: Spot + USDT Perpetual"
+    )
+
     print("================================")
 
     start_time = time.time()
 
-    symbols = get_symbols()
+    # --------------------------------
+    # GET SPOT SYMBOLS
+    # --------------------------------
+
+    spot_symbols = get_spot_symbols()
 
     print(
-        f"Found {len(symbols)} "
-        f"USDT spot pairs."
+        f"Spot USDT pairs: "
+        f"{len(spot_symbols)}"
     )
+
+    # --------------------------------
+    # GET FUTURES SYMBOLS
+    # --------------------------------
+
+    futures_symbols = get_futures_symbols()
+
+    print(
+        f"USDT Perpetual pairs: "
+        f"{len(futures_symbols)}"
+    )
+
+    # --------------------------------
+    # CREATE SCAN TASKS
+    # --------------------------------
+
+    tasks = []
+
+    for symbol in spot_symbols:
+
+        tasks.append(
+            (
+                "SPOT",
+                symbol
+            )
+        )
+
+    for symbol in futures_symbols:
+
+        tasks.append(
+            (
+                "FUTURES",
+                symbol
+            )
+        )
+
+    print(
+        f"Total markets to scan: "
+        f"{len(tasks)}"
+    )
+
+    # --------------------------------
+    # LOAD ALERT STATE
+    # --------------------------------
 
     alerted = load_state()
 
@@ -269,19 +456,26 @@ def main():
         max_workers=MAX_WORKERS
     ) as executor:
 
-        futures = {
-            executor.submit(
+        futures = {}
+
+        for market, symbol in tasks:
+
+            future = executor.submit(
                 check_coin,
+                market,
                 symbol
-            ): symbol
-            for symbol in symbols
-        }
+            )
+
+            futures[future] = (
+                market,
+                symbol
+            )
 
         for future in as_completed(
             futures
         ):
 
-            symbol = futures[
+            market, symbol = futures[
                 future
             ]
 
@@ -292,10 +486,13 @@ def main():
                 result = future.result()
 
                 if result is None:
+
                     continue
 
                 (
+                    market,
                     symbol,
+                    display_symbol,
                     change,
                     current_price,
                     highest_price,
@@ -303,16 +500,26 @@ def main():
                 ) = result
 
                 # --------------------------------
-                # NEW +23% ALERT
+                # UNIQUE STATE KEY
+                # --------------------------------
+
+                state_key = (
+                    f"{market}:{symbol}"
+                )
+
+                # --------------------------------
+                # NEW ALERT
                 # --------------------------------
 
                 if change >= THRESHOLD:
 
-                    if symbol not in alerted:
+                    if state_key not in alerted:
 
                         new_alerts.append(
                             (
+                                market,
                                 symbol,
+                                display_symbol,
                                 change,
                                 current_price,
                                 highest_price,
@@ -321,12 +528,12 @@ def main():
                         )
 
                         alerted.add(
-                            symbol
+                            state_key
                         )
 
                         print(
                             f"NEW ALERT: "
-                            f"{symbol} "
+                            f"{display_symbol} "
                             f"+{change:.2f}%"
                         )
 
@@ -336,32 +543,37 @@ def main():
 
                 else:
 
-                    if symbol in alerted:
+                    if state_key in alerted:
 
                         alerted.remove(
-                            symbol
+                            state_key
                         )
 
                         print(
-                            f"RESET: {symbol}"
+                            f"RESET: "
+                            f"{display_symbol}"
                         )
 
             except Exception as e:
 
                 print(
+                    f"{market} "
                     f"{symbol}: {e}"
                 )
 
-            # Progress
+            # --------------------------------
+            # PROGRESS
+            # --------------------------------
+
             if (
                 completed % 100 == 0
-                or completed == len(symbols)
+                or completed == len(tasks)
             ):
 
                 print(
                     f"Checked "
                     f"{completed}/"
-                    f"{len(symbols)}"
+                    f"{len(tasks)}"
                 )
 
     # --------------------------------
@@ -372,7 +584,10 @@ def main():
         alerted
     )
 
-    elapsed = time.time() - start_time
+    elapsed = (
+        time.time()
+        - start_time
+    )
 
     print("================================")
 
@@ -393,20 +608,33 @@ def main():
     print("================================")
 
     # --------------------------------
-    # SEND TELEGRAM ALERTS
+    # TELEGRAM ALERTS
     # --------------------------------
 
     for (
+        market,
         symbol,
+        display_symbol,
         change,
         current_price,
         highest_price,
         start_price
     ) in new_alerts:
 
+        if market == "SPOT":
+
+            market_name = "Spot"
+
+        else:
+
+            market_name = (
+                "USDT Perpetual"
+            )
+
         message = (
             "⚡ Market Alert\n\n"
-            f"🪙 {symbol}\n"
+            f"🪙 {display_symbol}\n"
+            f"📊 Market: {market_name}\n"
             f"📈 2H Move: +{change:.2f}%\n"
             f"💰 Current: {current_price}\n"
             f"🔥 2H High: {highest_price}\n"
@@ -421,7 +649,7 @@ def main():
 
             print(
                 f"Telegram sent: "
-                f"{symbol}"
+                f"{display_symbol}"
             )
 
         except Exception as e:
@@ -431,5 +659,10 @@ def main():
             )
 
 
+# --------------------------------
+# START
+# --------------------------------
+
 if __name__ == "__main__":
+
     main()
