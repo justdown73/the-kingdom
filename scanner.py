@@ -6,33 +6,16 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-# ============================================================
-# SETTINGS
-# ============================================================
-
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-# Binance Spot public market-data API
-SPOT_URL = "https://data-api.binance.vision"
-
-# Binance official Futures API
-FUTURES_URLS = [
-    "https://fapi.binance.com",
-
-    # Public fallback mirror.
-    # Used only if the official Futures API is unavailable
-    # from the GitHub Actions runner.
-    "https://api-dev.pipai.org",
-]
+BINANCE_URL = "https://data-api.binance.vision"
 
 THRESHOLD = 23.0
-
-# 25 x 5-minute candles ≈ 2 hours
 WINDOW_CANDLES = 25
-
 STATE_FILE = "alerts.json"
 
+# Safe parallel workers
 MAX_WORKERS = 20
 
 HEADERS = {
@@ -40,57 +23,44 @@ HEADERS = {
 }
 
 
-# This will store the Futures API source that actually works.
-ACTIVE_FUTURES_URL = None
+def api_get(path, params=None):
 
-
-# ============================================================
-# GENERIC API REQUEST
-# ============================================================
-
-def api_get(base_url, path, params=None):
-    """
-    Send GET request with retry handling.
-    """
-
-    url = base_url + path
+    url = BINANCE_URL + path
 
     for attempt in range(3):
 
         try:
-            response = requests.get(
+
+            r = requests.get(
                 url,
                 params=params,
                 headers=HEADERS,
                 timeout=20
             )
 
-            if response.status_code == 200:
-                return response.json()
+            if r.status_code == 200:
+                return r.json()
 
-            if response.status_code in (429, 418):
+            if r.status_code in (429, 418):
 
                 wait = int(
-                    response.headers.get(
+                    r.headers.get(
                         "Retry-After",
                         "10"
                     )
                 )
 
                 print(
-                    f"Rate limited: {url}"
-                )
-
-                print(
-                    f"Waiting {wait} seconds..."
+                    f"Rate limited. "
+                    f"Waiting {wait}s..."
                 )
 
                 time.sleep(wait)
-
                 continue
 
             print(
-                f"API error {response.status_code}: {url}"
+                f"API error {r.status_code}: "
+                f"{url}"
             )
 
             return None
@@ -98,20 +68,13 @@ def api_get(base_url, path, params=None):
         except Exception as e:
 
             print(
-                f"Request error: {url}"
+                f"Request error: {e}"
             )
 
-            print(e)
-
-            if attempt < 2:
-                time.sleep(2)
+            time.sleep(2)
 
     return None
 
-
-# ============================================================
-# TELEGRAM
-# ============================================================
 
 def send_telegram(message):
 
@@ -120,7 +83,7 @@ def send_telegram(message):
         f"bot{TELEGRAM_TOKEN}/sendMessage"
     )
 
-    response = requests.post(
+    r = requests.post(
         url,
         data={
             "chat_id": CHAT_ID,
@@ -129,11 +92,12 @@ def send_telegram(message):
         timeout=20
     )
 
-    response.raise_for_status()
+    r.raise_for_status()
 
-    result = response.json()
+    result = r.json()
 
     if not result.get("ok"):
+
         raise Exception(
             result.get(
                 "description",
@@ -144,10 +108,6 @@ def send_telegram(message):
     return result
 
 
-# ============================================================
-# ALERT STATE
-# ============================================================
-
 def load_state():
 
     if not os.path.exists(STATE_FILE):
@@ -157,8 +117,7 @@ def load_state():
 
         with open(
             STATE_FILE,
-            "r",
-            encoding="utf-8"
+            "r"
         ) as f:
 
             data = json.load(f)
@@ -170,11 +129,7 @@ def load_state():
             )
         )
 
-    except Exception as e:
-
-        print(
-            f"Could not load alert state: {e}"
-        )
+    except Exception:
 
         return set()
 
@@ -183,44 +138,40 @@ def save_state(alerted):
 
     with open(
         STATE_FILE,
-        "w",
-        encoding="utf-8"
+        "w"
     ) as f:
 
         json.dump(
             {
-                "alerted": sorted(alerted)
+                "alerted": sorted(
+                    alerted
+                )
             },
             f,
             indent=2
         )
 
 
-# ============================================================
-# SPOT MARKET LIST
-# ============================================================
-
-def get_spot_symbols():
+def get_symbols():
 
     data = api_get(
-        SPOT_URL,
         "/api/v3/exchangeInfo"
     )
 
     if not data:
 
         raise Exception(
-            "Could not get Binance Spot exchange information."
+            "Could not get Binance exchange information."
         )
 
     symbols = []
 
-    for s in data.get("symbols", []):
+    for s in data["symbols"]:
 
         if (
-            s.get("status") == "TRADING"
-            and s.get("quoteAsset") == "USDT"
-            and s.get("isSpotTradingAllowed") is True
+            s["status"] == "TRADING"
+            and s["quoteAsset"] == "USDT"
+            and s["isSpotTradingAllowed"]
         ):
 
             symbols.append(
@@ -230,92 +181,9 @@ def get_spot_symbols():
     return symbols
 
 
-# ============================================================
-# FUTURES API CONNECTION
-# ============================================================
-
-def get_futures_exchange_info():
-
-    global ACTIVE_FUTURES_URL
-
-    print("")
-    print("Checking Futures API...")
-    print("")
-
-    for base_url in FUTURES_URLS:
-
-        print(
-            f"Trying Futures source: {base_url}"
-        )
-
-        data = api_get(
-            base_url,
-            "/fapi/v1/exchangeInfo"
-        )
-
-        if data:
-
-            ACTIVE_FUTURES_URL = base_url
-
-            print(
-                f"Futures source connected: {base_url}"
-            )
-
-            return data
-
-        print(
-            f"Futures source failed: {base_url}"
-        )
-
-    print("")
-    print(
-        "WARNING: No Futures API source is available."
-    )
-    print(
-        "Spot scanning will continue."
-    )
-    print("")
-
-    return None
-
-
-# ============================================================
-# FUTURES MARKET LIST
-# ============================================================
-
-def get_futures_symbols():
-
-    data = get_futures_exchange_info()
-
-    if not data:
-
-        return []
-
-    symbols = []
-
-    for s in data.get("symbols", []):
-
-        if (
-            s.get("status") == "TRADING"
-            and s.get("quoteAsset") == "USDT"
-            and s.get("contractType") == "PERPETUAL"
-        ):
-
-            symbols.append(
-                s["symbol"]
-            )
-
-    return symbols
-
-
-# ============================================================
-# CHECK SPOT COIN
-# ============================================================
-
-def check_spot(symbol):
+def check_coin(symbol):
 
     candles = api_get(
-        SPOT_URL,
         "/api/v3/klines",
         {
             "symbol": symbol,
@@ -330,27 +198,32 @@ def check_spot(symbol):
     if len(candles) < 20:
         return None
 
+    # Price at the beginning of
+    # approximately the last 2 hours
     start_price = float(
         candles[0][1]
     )
 
+    # Highest price touched during
+    # the 2-hour window
     highest_price = max(
         float(candle[2])
         for candle in candles
     )
 
+    # Latest candle close
     current_price = float(
         candles[-1][4]
     )
 
+    # Maximum movement from
+    # the beginning of the window
     change = (
         (highest_price - start_price)
         / start_price
-        * 100
-    )
+    ) * 100
 
     return (
-        "SPOT",
         symbol,
         change,
         current_price,
@@ -358,64 +231,6 @@ def check_spot(symbol):
         start_price
     )
 
-
-# ============================================================
-# CHECK FUTURES COIN
-# ============================================================
-
-def check_futures(symbol):
-
-    if not ACTIVE_FUTURES_URL:
-        return None
-
-    candles = api_get(
-        ACTIVE_FUTURES_URL,
-        "/fapi/v1/klines",
-        {
-            "symbol": symbol,
-            "interval": "5m",
-            "limit": WINDOW_CANDLES
-        }
-    )
-
-    if not candles:
-        return None
-
-    if len(candles) < 20:
-        return None
-
-    start_price = float(
-        candles[0][1]
-    )
-
-    highest_price = max(
-        float(candle[2])
-        for candle in candles
-    )
-
-    current_price = float(
-        candles[-1][4]
-    )
-
-    change = (
-        (highest_price - start_price)
-        / start_price
-        * 100
-    )
-
-    return (
-        "FUTURES",
-        symbol,
-        change,
-        current_price,
-        highest_price,
-        start_price
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main():
 
@@ -423,40 +238,22 @@ def main():
     print("The Kingdom scanner started")
     print("Threshold: +23%")
     print("Window: 2 hours")
-    print(f"Parallel workers: {MAX_WORKERS}")
-    print("Markets: Spot + USDT Perpetual")
+
+    print(
+        f"Parallel workers: "
+        f"{MAX_WORKERS}"
+    )
+
     print("================================")
 
     start_time = time.time()
 
-    # --------------------------------------------------------
-    # GET SPOT SYMBOLS
-    # --------------------------------------------------------
-
-    spot_symbols = get_spot_symbols()
+    symbols = get_symbols()
 
     print(
-        f"Spot USDT pairs: {len(spot_symbols)}"
+        f"Found {len(symbols)} "
+        f"USDT spot pairs."
     )
-
-    # --------------------------------------------------------
-    # GET FUTURES SYMBOLS
-    # --------------------------------------------------------
-
-    futures_symbols = get_futures_symbols()
-
-    print(
-        f"USDT Perpetual pairs: {len(futures_symbols)}"
-    )
-
-    print(
-        f"Total markets to scan: "
-        f"{len(spot_symbols) + len(futures_symbols)}"
-    )
-
-    # --------------------------------------------------------
-    # LOAD ALERT STATE
-    # --------------------------------------------------------
 
     alerted = load_state()
 
@@ -464,77 +261,34 @@ def main():
 
     completed = 0
 
-    total_markets = (
-        len(spot_symbols)
-        + len(futures_symbols)
+    # --------------------------------
+    # PARALLEL SCANNING
+    # --------------------------------
+
+    print(
+        "Starting parallel scan..."
     )
-
-    # --------------------------------------------------------
-    # BUILD TASK LIST
-    # --------------------------------------------------------
-
-    tasks = []
-
-    for symbol in spot_symbols:
-
-        tasks.append(
-            (
-                "SPOT",
-                symbol
-            )
-        )
-
-    for symbol in futures_symbols:
-
-        tasks.append(
-            (
-                "FUTURES",
-                symbol
-            )
-        )
-
-    # --------------------------------------------------------
-    # PARALLEL SCAN
-    # --------------------------------------------------------
-
-    print("")
-    print("Starting parallel scan...")
-    print("")
 
     with ThreadPoolExecutor(
         max_workers=MAX_WORKERS
     ) as executor:
 
-        futures = {}
-
-        for market, symbol in tasks:
-
-            if market == "SPOT":
-
-                future = executor.submit(
-                    check_spot,
-                    symbol
-                )
-
-            else:
-
-                future = executor.submit(
-                    check_futures,
-                    symbol
-                )
-
-            futures[future] = (
-                market,
+        futures = {
+            executor.submit(
+                check_coin,
                 symbol
-            )
+            ): symbol
 
-        # ----------------------------------------------------
-        # PROCESS RESULTS
-        # ----------------------------------------------------
+            for symbol in symbols
+        }
 
-        for future in as_completed(futures):
+        for future in as_completed(
+            futures
+        ):
 
-            market, original_symbol = futures[future]
+            symbol = futures[
+                future
+            ]
 
             completed += 1
 
@@ -546,7 +300,6 @@ def main():
                     continue
 
                 (
-                    market,
                     symbol,
                     change,
                     current_price,
@@ -554,39 +307,16 @@ def main():
                     start_price
                 ) = result
 
-                # --------------------------------------------
-                # UNIQUE STATE KEY
-                # --------------------------------------------
-
-                state_key = (
-                    f"{market}:{symbol}"
-                )
-
-                # --------------------------------------------
-                # LEGACY SPOT STATE SUPPORT
-                # --------------------------------------------
-
-                legacy_key = symbol
-
-                already_alerted = (
-                    state_key in alerted
-                    or (
-                        market == "SPOT"
-                        and legacy_key in alerted
-                    )
-                )
-
-                # --------------------------------------------
-                # ALERT CONDITION
-                # --------------------------------------------
+                # --------------------------------
+                # NEW +23% ALERT
+                # --------------------------------
 
                 if change >= THRESHOLD:
 
-                    if not already_alerted:
+                    if symbol not in alerted:
 
                         new_alerts.append(
                             (
-                                market,
                                 symbol,
                                 change,
                                 current_price,
@@ -596,97 +326,89 @@ def main():
                         )
 
                         alerted.add(
-                            state_key
+                            symbol
                         )
 
                         print(
                             f"NEW ALERT: "
-                            f"{market} "
                             f"{symbol} "
                             f"+{change:.2f}%"
                         )
 
-                # --------------------------------------------
-                # RESET CONDITION
-                # --------------------------------------------
+                # --------------------------------
+                # RESET
+                # --------------------------------
 
                 else:
 
-                    if state_key in alerted:
+                    if symbol in alerted:
 
                         alerted.remove(
-                            state_key
+                            symbol
                         )
 
                         print(
                             f"RESET: "
-                            f"{market} "
                             f"{symbol}"
-                        )
-
-                    # Remove old Spot state too
-                    if (
-                        market == "SPOT"
-                        and legacy_key in alerted
-                    ):
-
-                        alerted.remove(
-                            legacy_key
                         )
 
             except Exception as e:
 
                 print(
-                    f"{market} {original_symbol}: {e}"
+                    f"{symbol}: {e}"
                 )
 
-            # --------------------------------------------
+            # --------------------------------
             # PROGRESS
-            # --------------------------------------------
+            # --------------------------------
 
             if (
                 completed % 100 == 0
-                or completed == total_markets
+                or completed == len(symbols)
             ):
 
                 print(
                     f"Checked "
                     f"{completed}/"
-                    f"{total_markets}"
+                    f"{len(symbols)}"
                 )
 
-    # --------------------------------------------------------
+    # --------------------------------
     # SAVE STATE
-    # --------------------------------------------------------
+    # --------------------------------
 
-    save_state(alerted)
+    save_state(
+        alerted
+    )
 
     elapsed = (
         time.time()
         - start_time
     )
 
-    # --------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------
-
-    print("")
-    print("================================")
-    print(
-        f"New alerts: {len(new_alerts)}"
-    )
-    print(
-        f"Scan time: {elapsed:.1f} seconds"
-    )
-    print("Scan completed.")
     print("================================")
 
-    # --------------------------------------------------------
+    print(
+        f"New alerts: "
+        f"{len(new_alerts)}"
+    )
+
+    print(
+        f"Scan time: "
+        f"{elapsed:.1f} seconds"
+    )
+
+    print(
+        "Scan completed."
+    )
+
+    print("================================")
+
+    # --------------------------------
     # SEND TELEGRAM ALERTS
-    # --------------------------------------------------------
+    # --------------------------------
 
     for (
-        market,
         symbol,
         change,
         current_price,
@@ -694,34 +416,9 @@ def main():
         start_price
     ) in new_alerts:
 
-        # --------------------------------------------
-        # DISPLAY SYMBOL
-        # --------------------------------------------
-
-        if market == "FUTURES":
-
-            display_symbol = (
-                f"{symbol}.P"
-            )
-
-            market_name = (
-                "USDT Perpetual"
-            )
-
-        else:
-
-            display_symbol = symbol
-
-            market_name = "Spot"
-
-        # --------------------------------------------
-        # MESSAGE
-        # --------------------------------------------
-
         message = (
             "⚡ Market Alert\n\n"
-            f"🪙 {display_symbol}\n"
-            f"📊 Market: {market_name}\n"
+            f"🪙 {symbol}\n"
             f"📈 2H Move: +{change:.2f}%\n"
             f"💰 Current: {current_price}\n"
             f"🔥 2H High: {highest_price}\n"
@@ -736,7 +433,7 @@ def main():
 
             print(
                 f"Telegram sent: "
-                f"{display_symbol}"
+                f"{symbol}"
             )
 
         except Exception as e:
@@ -746,10 +443,5 @@ def main():
             )
 
 
-# ============================================================
-# START
-# ============================================================
-
 if __name__ == "__main__":
-
     main()
